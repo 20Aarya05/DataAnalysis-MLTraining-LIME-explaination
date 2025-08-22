@@ -11,7 +11,7 @@ import plotly.graph_objects as go
 
 # Machine Learning
 from sklearn.model_selection import train_test_split
-from sklearn.preprocessing import OneHotEncoder, StandardScaler
+from sklearn.preprocessing import OneHotEncoder, StandardScaler, LabelEncoder # FIX: Added LabelEncoder
 from sklearn.impute import SimpleImputer
 from sklearn.compose import ColumnTransformer
 from sklearn.pipeline import Pipeline
@@ -280,6 +280,16 @@ if run_button:
             # 1. Prepare Data
             X = df.drop(columns=[target_col]).copy()
             y = df[target_col].copy()
+
+            # --- FIX START ---
+            # Encode target variable if it's categorical for classification
+            if task_type == "Classification" and y.dtype == 'object':
+                st.write("Target variable is categorical. Applying Label Encoding...")
+                le = LabelEncoder()
+                y = pd.Series(le.fit_transform(y), index=y.index)
+                st.session_state['label_encoder'] = le # Save for later use
+            # --- FIX END ---
+            
             y = y.loc[X.index] # Ensure alignment
 
             # Drop rows with missing target
@@ -287,13 +297,7 @@ if run_button:
             X = X[notna_mask]
             y = y[notna_mask]
             
-            # Feature selection
-            all_features = X.columns.tolist()
-            selected_features = st.multiselect("Select features to use (leave blank to use all)", all_features, default=all_features, key="feature_selector_main")
-            if not selected_features:
-                st.error("Please select at least one feature.")
-                st.stop()
-            
+            selected_features = X.columns.tolist()
             X = X[selected_features]
 
             # 2. Build Pipeline
@@ -340,14 +344,12 @@ with tab2:
     else:
         st.header("Model Performance on Test Set")
         
-        # Retrieve from session state
         y_test = st.session_state['y_test']
         y_pred = st.session_state['y_pred']
         pipeline = st.session_state['pipeline']
         X_test = st.session_state['X_test']
         task_type = st.session_state['task_type']
 
-        # Layout for metrics and charts
         res_col1, res_col2 = st.columns((1, 2))
 
         with res_col1:
@@ -357,12 +359,10 @@ with tab2:
                 prec = precision_score(y_test, y_pred, average='weighted', zero_division=0)
                 rec = recall_score(y_test, y_pred, average='weighted', zero_division=0)
                 f1 = f1_score(y_test, y_pred, average='weighted', zero_division=0)
-
                 st.metric("Accuracy", f"{acc:.4f}")
                 st.metric("Precision (weighted)", f"{prec:.4f}")
                 st.metric("Recall (weighted)", f"{rec:.4f}")
                 st.metric("F1 Score (weighted)", f"{f1:.4f}")
-
                 if hasattr(pipeline.named_steps['model'], "predict_proba") and y_test.nunique() == 2:
                     y_prob = pipeline.predict_proba(X_test)[:, 1]
                     auc = roc_auc_score(y_test, y_prob)
@@ -381,9 +381,9 @@ with tab2:
                 cm = confusion_matrix(y_test, y_pred)
                 class_labels = sorted(y_test.unique().astype(str))
                 fig = px.imshow(cm, text_auto=True, aspect="auto",
-                                 labels=dict(x="Predicted", y="Actual", color="Count"),
-                                 x=class_labels, y=class_labels,
-                                 title="Confusion Matrix", color_continuous_scale="Viridis")
+                                labels=dict(x="Predicted", y="Actual", color="Count"),
+                                x=class_labels, y=class_labels,
+                                title="Confusion Matrix", color_continuous_scale="Viridis")
                 st.plotly_chart(fig, use_container_width=True)
             else: # Regression
                 fig = px.scatter(x=y_test, y=y_pred, 
@@ -395,24 +395,18 @@ with tab2:
 
         st.markdown("---")
         
-        # Feature Importances (for tree-based models)
         model_in_pipeline = pipeline.named_steps['model']
         if isinstance(model_in_pipeline, (RandomForestClassifier, RandomForestRegressor)):
             st.subheader("Feature Importances")
             try:
-                # --- BUG FIX: Manually get feature names from preprocessor ---
                 preprocessor = pipeline.named_steps['preprocessor']
                 ohe = preprocessor.named_transformers_['cat'].named_steps['onehot']
-                
                 cat_feature_names = ohe.get_feature_names_out(st.session_state['cat_cols'])
                 num_feature_names = st.session_state['num_cols']
                 feature_names = num_feature_names + list(cat_feature_names)
-
                 importances = model_in_pipeline.feature_importances_
-                
                 imp_df = pd.DataFrame({'feature': feature_names, 'importance': importances})
                 imp_df = imp_df.sort_values('importance', ascending=False).head(20)
-
                 fig = px.bar(imp_df, x='importance', y='feature', orientation='h',
                              title="Top 20 Feature Importances", color_discrete_sequence=px.colors.qualitative.Pastel)
                 fig.update_layout(yaxis={'categoryorder':'total ascending'}, template='plotly_dark')
@@ -420,20 +414,16 @@ with tab2:
             except Exception as e:
                 st.warning(f"⚠️ Could not generate feature importance plot. Error: {e}")
 
-        # Expander for advanced details
         with st.expander("Show Advanced Training Details"):
             st.write("Model:", pipeline.named_steps['model'])
             st.write("Training Set Size:", len(st.session_state['X_train']))
             st.write("Test Set Size:", len(st.session_state['X_test']))
             st.write("Numeric Features Processed:", st.session_state['num_cols'])
             st.write("Categorical Features Processed:", st.session_state['cat_cols'])
-
-            # Download predictions
             if st.button("Download Test Set Predictions"):
                 out_df = st.session_state['X_test'].copy().reset_index(drop=True)
                 out_df["actual_target"] = st.session_state['y_test'].reset_index(drop=True)
                 out_df["predicted_target"] = st.session_state['y_pred']
-                
                 towrite = BytesIO()
                 out_df.to_excel(towrite, index=False, engine='openpyxl')
                 towrite.seek(0)
@@ -441,81 +431,125 @@ with tab2:
                 href = f'<a href="data:application/vnd.openxmlformats-officedocument.spreadsheetml.sheet;base64,{b64}" download="predictions.xlsx">Download predictions.xlsx</a>'
                 st.markdown(href, unsafe_allow_html=True)
 
-
 # --- Tab 3: Explain Predictions (LIME) ---
 with tab3:
-    if not st.session_state['model_trained']:
+    if not st.session_state.get('model_trained'):
         st.info("Train a model first to use the LIME explainer.")
     else:
         st.header("Local Interpretable Model-agnostic Explanations (LIME)")
-        st.markdown("Select an instance from the test set to understand why the model made a specific prediction for it. The chart below shows the most influential features for that prediction.")
+        st.markdown("Select an instance from the test set to understand why the model made a specific prediction for it.")
 
-        # Retrieve necessary data from session state
+        # --- Load objects from session state ---
         pipeline = st.session_state['pipeline']
         X_train = st.session_state['X_train']
         X_test = st.session_state['X_test']
         y_train = st.session_state['y_train']
         task_type = st.session_state['task_type']
         selected_features = st.session_state['selected_features']
-        
-        # --- LIME Explainer Setup (Pre-fit) ---
-        preprocessor = pipeline.named_steps['preprocessor']
-        ohe = preprocessor.named_transformers_['cat'].named_steps['onehot']
-        
-        # Manually create feature names for LIME
-        cat_feature_names = ohe.get_feature_names_out(st.session_state['cat_cols'])
-        num_feature_names = st.session_state['num_cols']
-        feature_names_for_lime = num_feature_names + list(cat_feature_names)
-        
-        def predict_fn_for_lime(x):
-            # LIME returns a numpy array, so we must convert it back to a DataFrame
-            df_tmp = pd.DataFrame(x, columns=st.session_state['selected_features'])
-            return pipeline.predict(df_tmp)
-        
+        cat_cols = st.session_state['cat_cols']
+
         try:
-            # LIME needs to see the data in a format it can handle, often a numpy array.
+            # --- Robust prediction function for LIME ---
+            model_only = pipeline.named_steps['model']
+
+            def robust_predict_fn(x):
+                if task_type == "Classification":
+                    return model_only.predict_proba(x)
+                else:
+                    return model_only.predict(x)
+
+
+            # --- Define class names correctly for the explainer ---
+            class_names = None
+            if task_type == "Classification":
+                if 'label_encoder' in st.session_state:
+                    class_names = st.session_state['label_encoder'].classes_.astype(str)
+                else:
+                    class_names = [str(c) for c in np.unique(y_train)]
+
+            # --- Initialize the LIME Explainer ---
+            categorical_features_indices = [selected_features.index(col) for col in cat_cols if col in selected_features]
+            
+            # Get preprocessed data (the actual input to the model)
+            X_train_transformed = pipeline.named_steps['preprocessor'].transform(X_train)
+            X_test_transformed = pipeline.named_steps['preprocessor'].transform(X_test)
+
+            # Get feature names after transformation
+            ohe = pipeline.named_steps['preprocessor'].named_transformers_['cat'].named_steps['onehot']
+            cat_feature_names = ohe.get_feature_names_out(cat_cols)
+            num_feature_names = st.session_state['num_cols']
+            all_feature_names = list(num_feature_names) + list(cat_feature_names)
+
             explainer = LimeTabularExplainer(
-                training_data=X_train.values,
-                feature_names=selected_features,
-                class_names=[str(c) for c in np.unique(y_train)] if task_type == "Classification" else ['prediction'],
+                training_data=X_train_transformed,
+                feature_names=all_feature_names,
+                class_names=class_names,
                 mode=task_type.lower(),
-                discretize_continuous=True,
+                discretize_continuous=False,
                 random_state=42
             )
+
             
-            # --- Interactive LIME Explanation ---
+            # --- UI for selecting an instance ---
             instance_idx = st.selectbox(
                 "Choose an instance from the test set to explain:",
-                X_test.index
+                X_test.index,
+                help="This is the row number from the original dataset."
             )
             
             st.write("Explaining the following instance:")
             st.dataframe(X_test.loc[[instance_idx]])
+
+            # --- Display model prediction for context ---
+            st.write("---")
+            st.subheader("Model Prediction for this Instance")
+            instance_pred_encoded = pipeline.predict(X_test.loc[[instance_idx]])[0]
+            actual_value_encoded = st.session_state['y_test'].loc[instance_idx]
+
+            instance_pred = instance_pred_encoded
+            actual_value = actual_value_encoded
+
+            # Decode the prediction and actual value if a label encoder was used
+            if task_type == "Classification" and 'label_encoder' in st.session_state:
+                le = st.session_state['label_encoder']
+                instance_pred = le.inverse_transform([int(instance_pred_encoded)])[0]
+                actual_value = le.inverse_transform([int(actual_value_encoded)])[0]
+
+            pred_col, actual_col = st.columns(2)
+            pred_col.metric("Predicted Value", str(instance_pred))
+            actual_col.metric("Actual Value", str(actual_value))
+            st.write("---")
             
+            # --- Generate and display explanation on button click ---
             if st.button("Generate LIME Explanation", type="primary"):
-                instance_data = X_test.loc[instance_idx].values
+                instance_data = X_test_transformed[X_test.index.get_loc(instance_idx)]
                 
                 with st.spinner("⏳ Generating LIME explanation..."):
-                    # Check for regression or classification to use the correct prediction function
-                    if task_type == "Classification":
-                        predict_fn = pipeline.predict_proba
-                    else:
-                        predict_fn = predict_fn_for_lime
-                    
                     explanation = explainer.explain_instance(
                         instance_data,
-                        predict_fn,
-                        num_features=min(10, len(selected_features))
+                        robust_predict_fn,
+                        num_features=min(10, len(selected_features)),
+                        # FIX: For classification, focus on the predicted class
+                        top_labels=1 if task_type == "Classification" else None
                     )
                     
                     st.subheader("LIME Explanation Plot")
-                    st.write("This chart shows how features contribute to the model's prediction. Features in green support the prediction, while those in red contradict it.")
-                    fig = explanation.as_pyplot_figure()
+                    st.info("This chart shows the features that were most influential for this specific prediction. **Green** features pushed the prediction **higher** (or towards the predicted class), while **Red** features pushed it **lower**.")
+                    
+                    # FIX: Get the label to explain (for classification)
+                    label_to_explain = explanation.top_labels[0] if task_type == "Classification" else None
+                    
+                    fig = explanation.as_pyplot_figure(label=label_to_explain)
+                    fig.set_size_inches(4, 2)
                     st.pyplot(fig)
 
                     st.subheader("Explanation Details")
-                    st.write(pd.DataFrame(explanation.as_list(), columns=['Feature_Contribution', 'Contribution_Value']))
+                    st.write("The table below lists the features and their contribution weights.")
+                    
+                    explanation_list = explanation.as_list(label=label_to_explain)
+                    exp_df = pd.DataFrame(explanation_list, columns=['Feature Condition', 'Contribution Weight'])
+                    st.dataframe(exp_df)
         
         except Exception as e:
             st.error(f"⚠️ Failed to generate LIME explanation. Error: {e}")
-            st.error("This can sometimes happen due to issues with data variance or encoding. Please check your dataset.")
+            st.error("This can happen if data types are inconsistent or if a selected instance has missing values that cause issues during explanation.")
